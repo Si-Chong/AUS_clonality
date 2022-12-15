@@ -1,0 +1,1379 @@
+---
+title: "Factors that shape large-scale gradients in clonality (J. Biogeogr.)"
+author: "Si-Chong Chen"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: show
+    toc: true
+    toc_depth: 2
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+    number_sections: true
+    theme: paper
+---
+
+<br>
+
+```{r, global-options, include = FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, tidy = TRUE,
+                      fig.width = 5, fig.height = 4.5, fig.align = "center")
+```
+
+
+# Prepare occurrence data
+```{r}
+library(tidyverse)
+library(data.table)
+
+# Load species and trait file
+trait <- read_csv("species and traits Australia without fern.csv")
+
+# Load total occurrence file
+total <- read.table("total.txt", header = TRUE)
+
+# Match up trait data with species occurrence data
+total <- full_join(trait, total, by = "species") %>% 
+  drop_na() %>% 
+  mutate(species = str_replace(species, " ", "_"))
+
+# Write data
+write_tsv(total, file = "clonality and occurrence.txt")
+
+# Median occurrence per species
+median <- total %>% 
+  group_by(species, clonality) %>% 
+  summarise(latitude = median(latitude), longitude = median(longitude)) %>% 
+  mutate(species = str_replace(species, " ", "_"))
+
+# Write data
+write_csv(median, file = "clonality and occurrence median.csv")
+```
+
+
+# Extract environmental variables
+## Set up
+```{r}
+library(geodata)
+library(sp)
+library(raster)
+
+# Set spatial coordinates
+total <- read_tsv("clonality and occurrence.txt")
+coordinates(total) <- c("longitude","latitude")
+```
+
+
+## Altitude, climate and solar radiation
+Data source: WorldClim (v2.0)
+```{r}
+#-- Altitude
+# Get layer
+altitude_layer <- getData("worldclim", var = "alt", res = 2.5)
+# Extract data
+altitude <- extract(x = altitude_layer, y = total)
+
+
+#-- Solar radiation (kJ m-2 day-1)
+# Download and unzip data from WorldClim v2.0
+# Generate a stack object with all monthly layers (2.5m resolution)
+SR_filenames <- paste("wc2.0_2.5m_srad_", c(paste(0, 1:9, sep = ""), 10,11,12), ".tif", sep = "") 
+SR_layer <- stack(SR_filenames) 
+
+# Compute values of 12 months (daily average) as a raster layer 
+SR_layer <- sum(SR_layer)
+# Extract data from the summed layer (it is actually a sum of 12 days)
+SR <- extract(x = SR_layer, y = total)
+# Average daily solar exposure (MJ m-2)
+SR <- SR/12/1000
+
+# Write data
+df <- data.frame(total, SR)
+write.table(df, file = "clonality and occurrence_SR.txt", row.names = FALSE)
+
+
+#-- Bioclimate variables
+# Check the code: https://worldclim.org/data/bioclim.html
+# Note: WorldClim data has temperature data in C * 10 and precipitation data in mm (millimeter)
+# Check format: http://www.worldclim.org/formats1
+# A question: Does the raster::getData function download data from WorldClim (v1.4)?
+# So, I do not use raster::getData function here.
+
+# Download and unzip data from WorldClim (v2.0)
+# Generate a stack object with all bioclimate variables
+bio_filenames <- paste("wc2.0_bio_2.5m_", c(paste(0, 1:9, sep = ""), c(10:19)), ".tif", sep = "") 
+bio_layer <- stack(bio_filenames) 
+
+# Extract data
+bio <- extract(x = bio_layer, y = total)
+
+# Change column names
+bio <- data.frame(bio)
+bio_names <- paste("bio", c(paste(1:9), c(10:19)), sep = "")
+names(bio) <- bio_names
+
+# Write data
+df <- data.frame(total, altitude, SR, bio)
+write.table(df, file = "clonality and occurrence_WorldClimV2.txt", row.names = FALSE)
+```
+
+
+## Global Aridity Index (Moisture availability)
+Data source: CGIAR-CSI Global-Aridity and Global-PET Database
+http://www.cgiar-csi.org/data/global-aridity-and-pet-database
+```{r}
+aridity_layer <- raster("AI_annual/ai_yr/w001001.adf")
+aridity <- extract(x = aridity_layer, y = total)
+
+# Note: Global-Aridity values need to be multiplied for 0.0001 to retrieve the values in the correct units.
+aridity <- aridity * 0.0001
+```
+
+
+## NPP
+Data source: MOD17A3
+```{r}
+# NPP and GPP by year (global, merged tiles): Accessed in 15/12/2015
+# http://files.ntsg.umt.edu/data/NTSG_Products/MOD17/GeoTIFF/MOD17A3/GeoTIFF_30arcsec/
+# Citation info:
+# https://lpdaac.usgs.gov/dataset_discovery/modis/modis_products_table/mod17a3h_v006
+
+# Get layer
+NPP_layer <- raster("MOD17A3_Science_NPP_mean_00_14.tif")
+# Extract data
+NPP <- extract(x = NPP_layer, y = total)
+
+# Note: Scale factor is 0.1, so multiple by 0.1
+NPP <- NPP * 0.1  # Unit is "g C/m2/yr"
+
+# Write data
+df <- data.frame(total, NPP)
+write.table(df, file = "clonality and occurrence_NPP.txt", row.names = FALSE)
+```
+
+
+## Soil data
+Data source: SoilGrids250m 
+(https://www.isric.org/explore/soilgrids/faq-soilgrids)
+```{r}
+# Get layer (Download tif files)
+# Bulk density of the fine earth fraction:
+# bd_layer <- soil_world(var = "bdod", depth = 5, path = "SoilGrids250m")
+# pH (H2O):
+# ph_layer <- soil_world(var = "phh2o", depth = 5, path = "SoilGrids250m")
+# Soil organic carbon in fine earth:
+# soc_layer <- soil_world(var = "soc", depth = 5, path = "SoilGrids250m")
+# Total nitrogen (N):
+# tn_layer <- soil_world(var = "nitrogen", depth = 5, path = "SoilGrids250m")
+
+# Reload raster Layer
+bd_layer <- raster("SoilGrids250m/bdod_0-5cm_mean_30s.tif")
+ph_layer <- raster("SoilGrids250m/phh2o_0-5cm_mean_30s.tif")
+soc_layer <- raster("SoilGrids250m/soc_0-5cm_mean_30s.tif")
+tn_layer <- raster("SoilGrids250m/nitrogen_0-5cm_mean_30s.tif")
+
+# Extract data
+bd <- extract(x = bd_layer, y = total)
+ph <- extract(x = ph_layer, y = total)
+soc <- extract(x = soc_layer, y = total)
+tn <- extract(x = tn_layer, y = total)
+
+# Write data
+df <- data.frame(total, bd, ph, soc, tn)
+write.table(df, file = "clonality and occurrence_Soil.txt", row.names = FALSE)
+```
+
+
+## Combine occurrence-level data
+```{r}
+# Combine all environmental variables
+df <- data.frame(total, 
+                 altitude, SR, bio, 
+                 aridity, NPP,
+                 bd, ph, soc, tn) %>% 
+  as_tibble() %>% 
+  dplyr::select(-optional)
+
+# Write data
+write.table(df, file = "clonality and occurrence_WorldClimV2&Aridity&NPP&Soil.txt", row.names = FALSE)
+```
+
+
+## Get median value for each species
+```{r}
+df <- read.table("clonality and occurrence_WorldClimV2&Aridity&NPP&Soil.txt", header = TRUE)
+# Use tidyverse: 
+# df %>% group_by(species) %>% dplyr::summarise(across(where(is.numeric), ~ median(.x, na.rm = TRUE)))
+# Or use base R:
+df <- aggregate(df[, 2:31], list(df$species), FUN = median, na.rm = TRUE)
+df <- dplyr::rename(df, species = Group.1)
+
+# Combine plant traits
+trait <- read_csv("species and traits Australia without fern (4116 species).csv")
+data <- left_join(trait, df, by = c("species", "clonality"))
+
+# Rename levels of cotyledon
+# Use tidyverse:
+# data$cotyledon <- plyr::mapvalues(data$cotyledon, from = c("Austrobaileyale", "Ceratophyllale", "Cycadopsida", "Magnoliid", "Nymphaeales", "Pinopsida"), to = c(NA, NA, NA, NA, NA, NA))
+# Or use base R:
+data$cotyledon <- as.factor(data$cotyledon)
+levels(data$cotyledon) <- c(NA, NA, NA, "Eudicot", NA, "Monocot", NA, NA)
+
+# Write data
+write_csv(data, file = "clonality and occurrence median_WorldClimV2&Aridity&NPP&Soil.csv")
+```
+
+
+# Map
+```{r, fig.width = 14.4, fig.height = 12}
+mytheme <- theme(axis.line = element_line(linewidth = 1, colour = "black"),
+               axis.text.x = element_text(size = 30, colour = "black"),
+               axis.text.y = element_text(size = 30, colour = "black"),
+               axis.title.x = element_text(vjust = -0.25, size = 36, face = "bold"),
+               axis.title.y = element_text(vjust = 1.5, size = 36, face = "bold", angle = 90),
+               panel.background = element_rect(fill = "transparent"),
+               panel.grid.major = element_line(colour = "transparent"),
+               panel.grid.minor = element_line(colour = "transparent"),
+               panel.border = element_rect(fill = NA, colour = "black", linewidth = 1.5),
+               axis.ticks = element_line(colour = "black", linewidth = 1.5), axis.ticks.length = unit(0.3, "cm"),
+               legend.position = c(0.1, 0.85), 
+               legend.key.size = unit(1, "cm"),
+               legend.title = element_text(size = 24),
+               legend.text = element_text(size = 20))
+
+dat <- read_csv("logistic regression - no fewer than five specie.csv")
+dat <- dat %>% mutate(prop = yes/(yes + no))
+
+# Blue & Yellow
+map <- ggplot(dat, aes(x = longitude, y = latitude, colour = prop)) +
+  geom_point(shape = 15, cex = 4.5) +   # cex = 4.85 for full-filled grids
+  scale_colour_gradient2("Proportion of\nclonal species",
+                         limits = c(0, max(dat$prop)), midpoint = 0.25, 
+                         high = "#253494", mid = "#41b6c4", low = "#edf9b1") +
+  xlab(expression("Longitude ( "^"o"*"E )")) + ylab(expression("Latitude ( "^"o"*"S )")) +
+  mytheme
+
+# Save plot
+jpeg("map.jpg", units = "in", width = 14.4, height = 12, res = 300)
+map
+dev.off()
+
+map
+```
+
+
+# Generate phylogenetic tree
+4116 species in total
+```{r}
+data <- read.csv("clonality and occurrence median_WorldClimV2&Aridity&NPP&Soil.csv",
+                 row.names = "species")
+
+# Prepare a species list (use the plantlist package)
+# install.packages("plantlist", repos="http://R-Forge.R-project.org")
+# devtools::install_github("helixcn/plantlist", build_vignettes = TRUE)
+library(plantlist)
+# Replace "_" to a space in binomial species name
+species.list <- sub("_", " ", rownames(data))
+species.list <- plantlist::TPL(species.list)
+species.list <- species.list[, 1:3]
+colnames(species.list) <- c("species", "genus", "family")
+
+write_csv(species.list, "species.list (plantlist).csv")
+# 8 taxa fail to be binded to the tree.
+# Pick up these taxa:
+# geiger::name.check(tree, data)$data_not_tree
+
+# Note, in "species.list (plantlist).csv": (1) Manually correct or add family names; (2) Change the file name to avoid accidental overwritten.
+species.list <- read_csv("species.list (plantlist)_4116 corrected.csv")
+length(unique(species.list$family))    # 98 families
+## Use this species.list to build tree!!
+
+
+# Use GBOTB.extended in V.PhyloMaker
+# devtools::install_github("jinyizju/V.PhyloMaker")
+library(V.PhyloMaker)
+tree.GBOTB <- phylo.maker(species.list, scenarios = "S1")
+tree <- tree.GBOTB$scenario.1
+
+# Write tree
+write.tree(tree, "tree_4116 in V.PhyloMaker.tre")
+```
+
+
+# Phylogenetic logistic regression
+## Set up
+```{r}
+# Packages
+library(phylolm)
+library(rr2)
+library(popbio)
+```
+
+Modify "logi.hist.plot" function ("logi.hist.plot (modified).R" file):\
+Run source code of "logi.hist.plot" function (https://rdrr.io/cran/popbio/src/R/logi.hist.plot.R) <br>
+Change the source code as below:
+(1) col.cur = "red" ----> col.cur = "transparent"  
+(2) scale.hist = 5 ----> scale.hist = 4  
+(3) In "h.y1n <-", scale.hist ----> scale.hist/5  
+(4) In "at.up <-", scale.hist ----> scale.hist/5  
+(5) In "label.up <-", 10 ----> 10/5, 5 ----> 5/5  
+(6) [optional] col.hist = "blue" ----> col.hist = "grey"  
+(7) [optional] In "draw bottom histogram", col = col.hist ----> col = "#b4d77b"  
+(8) [optional] In "draw top histogram", col = col.hist ----> col = "#83a9f0"
+```{r}
+logi.hist.plot <- function(independ, depend, logi.mod = 1,
+                           type = "dit", boxp = TRUE, rug = FALSE,
+                           ylabel = "Probability", ylabel2 = "Frequency", xlabel = "", mainlabel = "",
+                           las.h = 1, counts = FALSE, ...) {
+  # get the label for the x-axis
+  # xlabel <- paste(deparse(substitute(independ)))
+  # define functions:
+  # set the draw area if no box plots are to be drawn
+  logi.scater <- function(independ, depend, scater = "n",
+                          x.lab = xlabel, las = las.h) {
+    plot(independ, depend,
+         cex = 1, type = scater,
+         ylab = ylabel, xlab = x.lab, main = mainlabel,
+         cex.lab = 1.2, las = las
+    )
+  }
+  # add rug plot if desired; you could change pch.rug
+  # (symbol type) or cex.rug (symbol size)
+  logi.rug <- function(independ, depend, pch.rug = 16,
+                       cex.rug = 1) {
+    points(independ, depend, pch = pch.rug, cex = cex.rug)
+  }
+  # set the draw area and add box plots; you could change
+  # cold.box (color of the boxes)
+  logi.box <- function(independ, depend, col.box = "gray",
+                       x.lab = xlabel, las = las.h) {
+    plot(independ, depend,
+         cex = 1, type = "n",
+         ylim = c(-0.1, 1.1), ylab = ylabel, # change ylabel2 to ylabel Nov 2, 2015
+         xlab = x.lab, cex.lab = 1.2, las = las
+    )
+    indep.1 <- independ[depend == 1]
+    indep.0 <- independ[depend == 0]
+    boxplot(indep.1,
+            horizontal = TRUE, add = TRUE,
+            at = 1.05, boxwex = 0.1, col = col.box, notch = TRUE
+    )
+    boxplot(indep.0,
+            horizontal = TRUE, add = TRUE,
+            at = -0.05, boxwex = 0.1, col = col.box, notch = TRUE
+    )
+  }
+  # fit binomial glm and add predicted curve; you could
+  # change col.cur (color of the curve) or lwd.cur(width
+  # of the curve)
+  logi.curve <- function(independ, depend, mod = logi.mod,
+                         col.cur = "transparent", lwd.cur = 4) {
+    if (mod == 1) {
+      mod3 <- glm(depend ~ independ,
+                  family = binomial
+      )
+    }
+    if (mod == 2) {
+      mod3 <- glm(depend ~ independ +
+                    I(independ^2), family = binomial)
+    }
+    x.new <- seq(min(independ), max(independ), len = 100)
+    y.new <- predict(mod3, data.frame(independ = x.new),
+                     type = "response"
+    )
+    lines(x.new, y.new, lwd = lwd.cur, col = col.cur)
+  }
+  # add dit plot; you may want to change pch.dit (type of
+  # points), cex.p (size of points), and incre (space
+  # between points)
+  logi.dit <- function(independ, depend, cex.p = 1,
+                       pch.dit = 1, incre = 0.02) {
+    indep.0 <- independ[depend == 0]
+    indep.1 <- independ[depend == 1]
+    uni.plot.0 <- function(x) length(which(indep.0 == x))
+    uni.plot.1 <- function(x) length(which(indep.1 == x))
+    # get the number of repeated values of "independ":
+    cosa.0 <- apply(as.matrix(unique(indep.0)), 1, uni.plot.0)
+    cosa.1 <- apply(as.matrix(unique(indep.1)), 1, uni.plot.1)
+    # start ploting:
+    points(independ, depend, pch = pch.dit, cex = cex.p)
+    for (i in 1:max(cosa.0)) {
+      for (j in 1:i) {
+        points(unique(indep.0)[which(cosa.0 == i + 1)],
+               rep(0 + incre * j, length(which(cosa.0 == i + 1))),
+               pch = pch.dit, cex = cex.p
+        )
+      }
+    }
+    for (i in 1:max(cosa.1)) {
+      for (j in 1:i) {
+        points(unique(indep.1)[which(cosa.1 == i + 1)],
+               rep(1 - incre * j, length(which(cosa.1 == i + 1))),
+               pch = pch.dit, cex = cex.p
+        )
+      }
+    }
+  }
+  # add histograms and frequency axes; you may want to change
+  # scale.hist (factor to scale histogram height to 0-1
+  # interval) or col.hist (color of histogram)
+  logi.hist <- function(independ, depend, scale.hist = 4,
+                        col.hist = "grey", count.hist = TRUE,
+                        intervalo = 0, las.h1 = las.h) {
+    # get the position of bins
+    h.br <- hist(independ, plot = FALSE)$br
+    if (intervalo > 0) {
+      h.br <- seq(
+        from = range(h.br)[1],
+        to = range(h.br)[2], by = intervalo
+      )
+    }
+    h.x <- hist(independ[depend == 0],
+                breaks = h.br,
+                plot = FALSE
+    )$mid
+    # get counts in each bin
+    h.y0 <- hist(independ[depend == 0],
+                 breaks = h.br,
+                 plot = FALSE
+    )$counts
+    h.y1 <- hist(independ[depend == 1],
+                 breaks = h.br,
+                 plot = FALSE
+    )$counts
+    # scale the histogram bars to max desired length:
+    h.y0n <- h.y0 / (max(c(h.y0, h.y1)) * scale.hist)
+    h.y1n <- 1 - h.y1 / (max(c(h.y0, h.y1)) * (scale.hist/5))
+    # draw bottom histogram:
+    for (i in 1:length(h.y0n)) {
+      if (h.y0n[i] > 0) {
+        polygon(c(rep(h.br[i], 2), rep(h.br[i + 1], 2)),
+                c(0, rep(h.y0n[i], 2), 0),
+                col = "#b4d77b"
+        )
+      }
+    }
+    # draw top histogram:
+    for (i in 1:length(h.y1n)) {
+      if (h.y1n[i] < 1) {
+        polygon(c(rep(h.br[i], 2), rep(h.br[i + 1], 2)),
+                c(h.y1n[i], 1, 1, h.y1n[i]),
+                col = "#83a9f0"
+        )
+      }
+    }
+    # add counts to bins if required:
+    if (counts == TRUE) {
+      for (i in 1:length(h.x)) {
+        text(h.x[i], h.y1n[i], h.y1[i], cex = 1, pos = 1)
+        text(h.x[i], h.y0n[i], h.y0[i], cex = 1, pos = 3)
+      }
+    }
+    # plot the axes of histograms:
+    axis.hist <- function(h.y0, h.y1, scale.hist,
+                          las = las.h1) {
+      tope <- max(c(h.y0, h.y1))
+      label.down <- c(
+        0, (ceiling(tope / 10)) * 5,
+        (ceiling(tope / 10)) * 10
+      )
+      label.up <- c(
+        (ceiling(tope / 10)) * (10/5),
+        (ceiling(tope / 10)) * (5/5), 0
+      )
+      at.down <- label.down / (tope * scale.hist)
+      at.up <- 1 - (label.up / (tope * (scale.hist/5)))
+      at.hist <- c(at.down, at.up)
+      label.hist <- c(label.down, label.up)
+      axis(
+        side = 4, at = at.hist, labels = label.hist,
+        las = las
+      )
+      mtext(ylabel2, side = 4, line = 2, cex = 1.2)
+    }
+    axis.hist(h.y0, h.y1, scale.hist)
+    axis(side = 2, las = las.h1)
+  }
+  # set the margins of plot area
+  old.mar <- par()$mar
+  par(mar = c(5.1, 4.1, 4.1, 4.1))
+  # plot the combined graph
+  if (boxp == TRUE) logi.box(independ, depend)
+  if (boxp == FALSE) logi.scater(independ, depend)
+  if (type != "dit") logi.hist(independ, depend, ...)
+  if (rug == TRUE) logi.rug(independ, depend)
+  logi.curve(independ, depend)
+  if (type == "dit") logi.dit(independ, depend)
+  # reset the margins to old margins
+  par(mar = old.mar)
+}
+```
+
+
+```{r}
+# Load data (median values)
+data <- read.csv("clonality and occurrence median_WorldClimV2&Aridity&NPP&Soil.csv")
+row.names(data) <- data$species
+
+# Load tree
+library(ape)
+tree <- read.tree("tree_4116 in V.PhyloMaker.tre")
+
+# Check if the names match between the tree and the data frame. (We want it to be "OK".)
+# use "name.check" function in the "geiger" package
+# http://lukejharmon.github.io/ilhabela/instruction/2015/07/03/PGLS/
+# geiger::name.check(tree, data)
+
+# Check NA values in each column
+colSums(is.na(data))
+```
+
+## Environmental variables (continuous)
+```{r}
+#-- latitude.abs
+data$latitude.abs <- abs(data$latitude)
+fit = phyloglm(clonality ~ latitude.abs, phy = tree, data = data, method = "logistic_IG10")
+latitude_summary <- c(summary(fit)$alpha, 
+                      summary(fit)$coefficients[1,1], 
+                      summary(fit)$coefficients[2,1], 
+                      summary(fit)$coefficients[2,4], 
+                      R2(fit))
+
+# jpeg("graph_median_phylo/latitude.jpg", units = "in", width = 5, height = 4.5, res = 300)
+logi.hist.plot(data$latitude.abs, data$clonality, 
+               xlabel = expression("Latitude ( "^"o"*"S )"),
+               type = "hist", boxp = FALSE)
+curve(plogis(coef(fit)[1] + coef(fit)[2] * x), col = "black", lwd = 4, add = TRUE)
+
+
+#-- Mean annual temperature (bio1)
+fit = phyloglm(clonality ~ bio1, phy = tree, data = data, method = "logistic_IG10")
+bio1_summary <- c(summary(fit)$alpha, 
+                  summary(fit)$coefficients[1,1], 
+                  summary(fit)$coefficients[2,1], 
+                  summary(fit)$coefficients[2,4], 
+                  R2(fit))
+
+# jpeg("graph_median_phylo/bio1.jpg", units = "in", width = 5, height = 4.5, res = 300)
+logi.hist.plot(data$bio1, data$clonality, 
+               xlabel = expression("Mean annual temperature ("^"o"*"C)"),
+               type = "hist", boxp = FALSE)
+curve(plogis(coef(fit)[1] + coef(fit)[2] * x), col = "black", lwd = 4, add = TRUE)
+
+
+#-- Max temperature of warmest month (bio5)
+fit = phyloglm(clonality ~ bio5, phy = tree, data = data, method = "logistic_IG10")
+bio5_summary <- c(summary(fit)$alpha, 
+                  summary(fit)$coefficients[1,1], 
+                  summary(fit)$coefficients[2,1], 
+                  summary(fit)$coefficients[2,4], 
+                  R2(fit))
+
+# jpeg("graph_median_phylo/bio5.jpg", units = "in", width = 5, height = 4.5, res = 300)
+logi.hist.plot(data$bio5, data$clonality, 
+               xlabel = expression("Max temperature of warmest month ("^"o"*"C)"),
+               type = "hist", boxp = FALSE)
+curve(plogis(coef(fit)[1] + coef(fit)[2] * x), col = "black", lwd = 4, add = TRUE)
+
+
+#-- Min temperature of coldest month (bio6)
+fit = phyloglm(clonality ~ bio6, phy = tree, data = data, method = "logistic_IG10")
+bio6_summary <- c(summary(fit)$alpha, 
+                  summary(fit)$coefficients[1,1], 
+                  summary(fit)$coefficients[2,1], 
+                  summary(fit)$coefficients[2,4], 
+                  R2(fit))
+
+# jpeg("graph_median_phylo/bio6.jpg", units = "in", width = 5, height = 4.5, res = 300)
+logi.hist.plot(data$bio6, data$clonality, 
+               xlabel = expression("Min temperature of coldest month ("^"o"*"C)"),
+               type = "hist", boxp = FALSE)
+curve(plogis(coef(fit)[1] + coef(fit)[2] * x), col = "black", lwd = 4, add = TRUE)
+
+
+#-- Temperature seasonality (bio4)
+fit = phyloglm(clonality ~ bio4, phy = tree, data = data, method = "logistic_IG10")
+bio4_summary <- c(summary(fit)$alpha, 
+                  summary(fit)$coefficients[1,1], 
+                  summary(fit)$coefficients[2,1], 
+                  summary(fit)$coefficients[2,4], 
+                  R2(fit))
+
+# jpeg("graph_median_phylo/bio4.jpg", units = "in", width = 5, height = 4.5, res = 300)
+logi.hist.plot(data$bio4, data$clonality, 
+               xlabel = expression("Temperature seasonality"),
+               type = "hist", boxp = FALSE)
+# Non-significant; Don't draw the curve
+
+
+#-- Mean annual precipitation (bio12; log10 scale)
+data$bio12.log <- log10(data$bio12)
+fit = phyloglm(clonality ~ bio12.log, phy = tree, data = data, method = "logistic_IG10")
+bio12.log_summary <- c(summary(fit)$alpha, 
+                       summary(fit)$coefficients[1,1], 
+                       summary(fit)$coefficients[2,1], 
+                       summary(fit)$coefficients[2,4], 
+                       R2(fit))
+
+# jpeg("graph_median_phylo/bio12.jpg", units = "in", width = 5, height = 4.5, res = 300)
+logi.hist.plot(data$bio12.log, data$clonality, 
+               xlabel = expression("Mean annual precipitation (mm) [log" [10] *" scale]"),
+               type = "hist", boxp = FALSE)
+# Non-significant; Don't draw the curve
+
+
+#-- Precipitation of wettest month (bio13; log10 scale)
+data$bio13.log <- log10(data$bio13)
+fit = phyloglm(clonality ~ bio13.log, phy = tree, data = data, method = "logistic_IG10")
+bio13.log_summary <- c(summary(fit)$alpha, 
+                       summary(fit)$coefficients[1,1], 
+                       summary(fit)$coefficients[2,1], 
+                       summary(fit)$coefficients[2,4], 
+                       R2(fit))
+
+# jpeg("graph_median_phylo/bio13.jpg", units = "in", width = 5, height = 4.5, res = 300)
+logi.hist.plot(data$bio13.log, data$clonality, 
+               xlabel = expression("Precipitation of wettest month (mm) [log" [10] *" scale]"),
+               type = "hist", boxp = FALSE)
+# Non-significant; Don't draw the curve
+
+
+#-- Precipitation of driest month (bio14; log10 scale)
+data$bio14.log <- log10(data$bio14+0.1)
+fit = phyloglm(clonality ~ bio14.log, phy = tree, data = data, method = "logistic_IG10")
+bio14.log_summary <- c(summary(fit)$alpha, 
+                       summary(fit)$coefficients[1,1], 
+                       summary(fit)$coefficients[2,1], 
+                       summary(fit)$coefficients[2,4], 
+                       R2(fit))
+
+# jpeg("graph_median_phylo/bio14.jpg", units = "in", width = 5, height = 4.5, res = 300)
+logi.hist.plot(data$bio14.log, data$clonality, 
+               xlabel = expression("Precipitation of driest month (mm) [log" [10] *" scale]"),
+               type = "hist", boxp = FALSE)
+curve(plogis(coef(fit)[1] + coef(fit)[2] * x), col = "black", lwd = 4, add = TRUE)
+
+
+#-- Precipitation seasonality (bio15)
+fit = phyloglm(clonality ~ bio15, phy = tree, data = data, method = "logistic_IG10")
+bio15_summary <- c(summary(fit)$alpha, 
+                   summary(fit)$coefficients[1,1], 
+                   summary(fit)$coefficients[2,1], 
+                   summary(fit)$coefficients[2,4], 
+                   R2(fit))
+
+# jpeg("graph_median_phylo/bio15.jpg", units = "in", width = 5, height = 4.5, res = 300)
+logi.hist.plot(data$bio15, data$clonality, 
+               xlabel = expression("Precipitation seasonality"),
+               type = "hist", boxp = FALSE)
+curve(plogis(coef(fit)[1] + coef(fit)[2] * x), col = "black", lwd = 4, add = TRUE)
+
+
+#-- Aridity
+fit = phyloglm(clonality ~ aridity, phy = tree, data = data, method = "logistic_IG10")
+aridity_summary <- c(summary(fit)$alpha, 
+                   summary(fit)$coefficients[1,1], 
+                   summary(fit)$coefficients[2,1], 
+                   summary(fit)$coefficients[2,4], 
+                   R2(fit))
+
+# jpeg("graph_median_phylo/aridity.jpg", units = "in", width = 5, height = 4.5, res = 300)
+data_2 <- drop_na(data, aridity)
+logi.hist.plot(data_2$aridity, data_2$clonality, 
+               xlabel = expression("Moisture availability"), 
+               type = "hist", boxp = FALSE)
+curve(plogis(coef(fit)[1] + coef(fit)[2] * x), col = "black", lwd = 4, add = TRUE)
+
+
+#-- SR
+fit = phyloglm(clonality ~ SR, phy = tree, data = data, method = "logistic_IG10")
+SR_summary <- c(summary(fit)$alpha, 
+                summary(fit)$coefficients[1,1], 
+                summary(fit)$coefficients[2,1], 
+                summary(fit)$coefficients[2,4], 
+                R2(fit))
+
+# jpeg("graph_median_phylo/SR.jpg", units = "in", width = 5, height = 4.5, res = 300)
+logi.hist.plot(data$SR, data$clonality, 
+               xlabel = expression("Solar radiation (MJ/m"^"2"*")"),
+               type = "hist", boxp = FALSE)
+curve(plogis(coef(fit)[1] + coef(fit)[2] * x), col = "black", lwd = 4, add = TRUE)
+
+
+#-- NPP (log10 scale)
+data$NPP.log <- log10(data$NPP)
+fit = phyloglm(clonality ~ NPP.log, phy = tree, data = data, method = "logistic_IG10")
+NPP.log_summary <- c(summary(fit)$alpha, 
+                summary(fit)$coefficients[1,1], 
+                summary(fit)$coefficients[2,1], 
+                summary(fit)$coefficients[2,4], 
+                R2(fit))
+
+# jpeg("graph_median_phylo/NPP.jpg", units = "in", width = 5, height = 4.5, res = 300)
+logi.hist.plot(data$NPP.log, data$clonality, 
+               xlabel = expression("NPP (g C/m"^"2"*"/yr) [log" [10] *" scale]"),
+               type = "hist", boxp = FALSE)
+curve(plogis(coef(fit)[1] + coef(fit)[2] * x), col = "black", lwd = 4, add = TRUE)
+
+
+#-- Altitude (log10 scale)
+data$altitude.log <- log10(data$altitude)
+fit = phyloglm(clonality ~ altitude.log, phy = tree, data = data, method = "logistic_IG10")
+altitude.log_summary <- c(summary(fit)$alpha, 
+                summary(fit)$coefficients[1,1], 
+                summary(fit)$coefficients[2,1], 
+                summary(fit)$coefficients[2,4], 
+                R2(fit))
+
+# jpeg("graph_median_phylo/altitude.jpg", units = "in", width = 5, height = 4.5, res = 300)
+data_2 <- drop_na(data, altitude.log)
+logi.hist.plot(data_2$altitude.log, data_2$clonality, 
+               xlabel = expression("Altitude (m) [log" [10] *" scale]"),
+               type = "hist", boxp = FALSE)
+# Non-significant; Don't draw the curve
+
+
+#-- Soil bulk density
+fit = phyloglm(clonality ~ bd, phy = tree, data = data, method = "logistic_IG10")
+bd_summary <- c(summary(fit)$alpha, 
+                summary(fit)$coefficients[1,1], 
+                summary(fit)$coefficients[2,1], 
+                summary(fit)$coefficients[2,4], 
+                R2(fit))
+
+# jpeg("graph_median_phylo/bd.jpg", units = "in", width = 5, height = 4.5, res = 300)
+data_2 <- drop_na(data, bd)
+logi.hist.plot(data_2$bd, data_2$clonality, 
+               xlabel = expression("Soil bulk density (kg/dm"^"3"*")"), 
+               type = "hist", boxp = FALSE)
+curve(plogis(coef(fit)[1] + coef(fit)[2] * x), col = "black", lwd = 4, add = TRUE)
+
+
+#-- Soil pH
+fit = phyloglm(clonality ~ ph, phy = tree, data = data, method = "logistic_IG10")
+ph_summary <- c(summary(fit)$alpha, 
+                summary(fit)$coefficients[1,1], 
+                summary(fit)$coefficients[2,1], 
+                summary(fit)$coefficients[2,4], 
+                R2(fit))
+
+# jpeg("graph_median_phylo/ph.jpg", units = "in", width = 5, height = 4.5, res = 300)
+data_2 <- drop_na(data, ph)
+logi.hist.plot(data_2$ph, data_2$clonality, 
+               xlabel = expression("Soil pH"), 
+               type = "hist", boxp = FALSE)
+# Non-significant; Don't draw the curve
+
+
+#-- Soil organic carbon
+data$soc.log <- log10(data$soc)
+fit = phyloglm(clonality ~ soc.log, phy = tree, data = data, method = "logistic_IG10")
+soc.log_summary <- c(summary(fit)$alpha, 
+                summary(fit)$coefficients[1,1], 
+                summary(fit)$coefficients[2,1], 
+                summary(fit)$coefficients[2,4], 
+                R2(fit))
+
+# jpeg("graph_median_phylo/soc.jpg", units = "in", width = 5, height = 4.5, res = 300)
+data_2 <- drop_na(data, soc.log)
+logi.hist.plot(data_2$soc.log, data_2$clonality, 
+               xlabel = expression("Soil organic carbon (g/kg) [log" [10] *" scale]"), 
+               type = "hist", boxp = FALSE)
+curve(plogis(coef(fit)[1] + coef(fit)[2] * x), col = "black", lwd = 4, add = TRUE)
+
+
+#-- Soil nitrogen content
+data$tn.log <- log10(data$tn)
+fit = phyloglm(clonality ~ tn.log, phy = tree, data = data, method = "logistic_IG10")
+tn.log_summary <- c(summary(fit)$alpha, 
+                summary(fit)$coefficients[1,1], 
+                summary(fit)$coefficients[2,1], 
+                summary(fit)$coefficients[2,4], 
+                R2(fit))
+
+# jpeg("graph_median_phylo/tn.jpg", units = "in", width = 5, height = 4.5, res = 300)
+data_2 <- drop_na(data, tn.log)
+logi.hist.plot(data_2$tn.log, data_2$clonality, 
+               xlabel = expression("Soil nitrogen content (g/kg) [log" [10] *" scale]"), 
+               type = "hist", boxp = FALSE)
+curve(plogis(coef(fit)[1] + coef(fit)[2] * x), col = "black", lwd = 4, add = TRUE)
+```
+
+## Plant characteristics (continuous)
+```{r}
+#-- Plant height (log10 scale)
+data$height.log <- log10(data$height)
+fit = phyloglm(clonality ~ height.log, phy = tree, data = data, method = "logistic_IG10")
+height.log_summary <- c(summary(fit)$alpha, 
+                        summary(fit)$coefficients[1,1], 
+                        summary(fit)$coefficients[2,1], 
+                        summary(fit)$coefficients[2,4], 
+                        R2(fit))
+
+# jpeg("graph_median_phylo/height.jpg", units = "in", width = 5, height = 4.5, res = 300)
+data_2 <- drop_na(data, height.log)
+logi.hist.plot(data_2$height.log, data_2$clonality, 
+               xlabel = expression("Plant height (m) [log" [10] *" scale]"),
+               type = "hist", boxp = FALSE)
+curve(plogis(coef(fit)[1] + coef(fit)[2] * x), col = "black", lwd = 4, add = TRUE)
+```
+
+## Plant characteristics (categorial)
+```{r}
+#-- Growth form
+fit = phyloglm(clonality ~ GF, phy = tree, data = data, method = "logistic_IG10")
+GF_summary <- c(summary(fit)$alpha, 
+                summary(fit)$coefficients[1,1], 
+                summary(fit)$coefficients[2,1], 
+                summary(fit)$coefficients[2,4], 
+                R2(fit))
+
+# Calculate ranges
+Int.Est = summary(fit)$coefficients[1,1]
+Int.SE = summary(fit)$coefficients[1,2]
+Slope.Est = summary(fit)$coefficients[2,1]
+Slope.SE = summary(fit)$coefficients[2,2]
+# Herbaceous
+mean = boot::inv.logit(Int.Est)
+se.up = boot::inv.logit(Int.Est + Int.SE)
+se.low = boot::inv.logit(Int.Est - Int.SE)
+H = c("H", se.low, mean, se.up, "Herbaceous")
+# Woody
+mean = boot::inv.logit(Int.Est + Slope.Est)
+se.up = boot::inv.logit(Int.Est + Slope.Est + Slope.SE)
+se.low = boot::inv.logit(Int.Est + Slope.Est - Slope.SE)
+W = c("W", se.low, mean, se.up, "Woody")
+
+
+#-- Life span
+fit = phyloglm(clonality ~ lifespan, phy = tree, data = data, method = "logistic_IG10")
+lifespan_summary <- c(summary(fit)$alpha, 
+                summary(fit)$coefficients[1,1], 
+                summary(fit)$coefficients[2,1], 
+                summary(fit)$coefficients[2,4], 
+                R2(fit))
+
+# Calculate ranges
+Int.Est = summary(fit)$coefficients[1,1]
+Int.SE = summary(fit)$coefficients[1,2]
+Slope.Est = summary(fit)$coefficients[2,1]
+Slope.SE = summary(fit)$coefficients[2,2]
+# Annual
+mean = boot::inv.logit(Int.Est)
+se.up = boot::inv.logit(Int.Est + Int.SE)
+se.low = boot::inv.logit(Int.Est - Int.SE)
+A = c("A", se.low, mean, se.up, "Annual")
+# Perennial
+mean = boot::inv.logit(Int.Est + Slope.Est)
+se.up = boot::inv.logit(Int.Est + Slope.Est + Slope.SE)
+se.low = boot::inv.logit(Int.Est + Slope.Est - Slope.SE)
+P = c("P", se.low, mean, se.up, "Perennial")
+
+
+#-- Taxonomic group (cotyledon)
+fit = phyloglm(clonality ~ cotyledon, phy = tree, data = data, method = "logistic_IG10")
+cotyledon_summary <- c(summary(fit)$alpha, 
+                summary(fit)$coefficients[1,1], 
+                summary(fit)$coefficients[2,1], 
+                summary(fit)$coefficients[2,4], 
+                R2(fit))
+
+# Calculate ranges
+Int.Est = summary(fit)$coefficients[1,1]
+Int.SE = summary(fit)$coefficients[1,2]
+Slope.Est = summary(fit)$coefficients[2,1]
+Slope.SE = summary(fit)$coefficients[2,2]
+# Eudicot
+mean = boot::inv.logit(Int.Est)
+se.up = boot::inv.logit(Int.Est + Int.SE)
+se.low = boot::inv.logit(Int.Est - Int.SE)
+E = c("E", se.low, mean, se.up, "Eudicot")
+# Monocot
+mean = boot::inv.logit(Int.Est + Slope.Est)
+se.up = boot::inv.logit(Int.Est + Slope.Est + Slope.SE)
+se.low = boot::inv.logit(Int.Est + Slope.Est - Slope.SE)
+M = c("M", se.low, mean, se.up, "Monocot")
+
+#-- Write data
+# Use base R:
+# df <- data.frame(rbind(M, E, H, W, A, P), row.names = NULL)
+# colnames(df) <- c("PT", "se.low", "mean", "se.up", "Plant.trait")
+# df[, 2:4] <- apply(df[, 2:4], MARGIN = 2, FUN = as.numeric)
+df <- rbind(M, E, H, W, A, P) %>% as_tibble() %>% 
+  dplyr::mutate(across(2:4, as.numeric)) %>% 
+  dplyr::rename("PT" = V1, 
+                "se.low" = V2, "mean" = V3, "se.up" = V4, 
+                "Plant.trait" = V5)
+write_csv(df, file = "Plant traits (categorial) - 2022.csv")
+
+
+# Line plot with error bars
+Cotyledon <- ggplot(data = df[c(1:2), ], aes(x = Plant.trait, y = mean)) + 
+  geom_point(size = 4) +
+  geom_errorbar(aes(ymax = se.up, ymin = se.low), width = 0.1) +
+  labs(x = "Taxonomic group", y = "Probability") + 
+  theme_classic(base_size = 20) + 
+  theme(axis.text.x = element_text(colour = "black"), axis.text.y = element_text(colour = "black"))
+
+GF <- ggplot(data = df[c(3:4), ], aes(x = Plant.trait, y = mean)) + 
+  geom_point(size = 4) +
+  geom_errorbar(aes(ymax = se.up, ymin = se.low), width = 0.1) +
+  labs(x = "Growth form", y = "Probability") + 
+  theme_classic(base_size = 20) + 
+  theme(axis.text.x = element_text(colour = "black"), axis.text.y = element_text(colour = "black"))
+
+Lifespan <- ggplot(data = df[c(5:6), ], aes(x = Plant.trait, y = mean)) + 
+  geom_point(size = 4) +
+  geom_errorbar(aes(ymax = se.up, ymin = se.low), width = 0.1) +
+  labs(x = "Life span", y = "Probability") + 
+  theme_classic(base_size = 20) + 
+  theme(axis.text.x = element_text(colour = "black"), axis.text.y = element_text(colour = "black"))
+
+# jpeg("graph_median_phylo/median.Cotyledon.jpg", units = "in", width = 5, height = 4.5, res = 300)
+# jpeg("graph_median_phylo/median.GF.jpg", units = "in", width = 5, height = 4.5, res = 300)
+# jpeg("graph_median_phylo/median.Lifespan.jpg", units = "in", width = 5, height = 4.5, res = 300)
+```
+
+```{r, fig.width = 10.5, fig.height = 4.5}
+# Plot
+library(cowplot)
+plot_grid(GF, Cotyledon, Lifespan, nrow = 1)
+```
+
+## Prepare some variable keys
+```{r}
+key <- c(height.log = "Plant height",
+         GF = "Growth form",
+         cotyledon = "Taxonomic group",
+         lifespan = "Life span",
+         bio1 = "Mean annual temperature",
+         bio5 = "Max temperature of warmest month",
+         bio6 = "Min temperature of coldest month",
+         bio4 = "Temperature seasonality",
+         bio12.log = "Mean annual precipitation",
+         bio13.log = "Precipitation of wettest month",
+         bio14.log = "Precipitation of driest month",
+         bio15 = "Precipitation seasonality",
+         aridity = "Moisture availability",
+         SR = "Solar radiation",
+         NPP.log = "NPP",
+         altitude.log = "Altitude",
+         bd = "Soil bulk density",
+         ph = "Soil pH",
+         soc.log = "Soil organic carbon",
+         tn.log = "Soil nitrogen content",
+         latitude = "Latitude")
+
+key_plant <- c(height.log = "Plant height",
+         GF = "Growth form",
+         cotyledon = "Taxonomic group",
+         lifespan = "Life span")
+
+key_env <- c(bio1 = "Mean annual temperature",
+         bio5 = "Max temperature of warmest month",
+         bio6 = "Min temperature of coldest month",
+         bio4 = "Temperature seasonality",
+         bio12.log = "Mean annual precipitation",
+         bio13.log = "Precipitation of wettest month",
+         bio14.log = "Precipitation of driest month",
+         bio15 = "Precipitation seasonality",
+         aridity = "Moisture availability",
+         SR = "Solar radiation",
+         NPP.log = "NPP",
+         altitude.log = "Altitude",
+         bd = "Soil bulk density",
+         ph = "Soil pH",
+         soc.log = "Soil organic carbon",
+         tn.log = "Soil nitrogen content")
+```
+
+## Summary
+```{r}
+comb <- data.frame(rbind(
+  height.log_summary, GF_summary, cotyledon_summary, lifespan_summary,
+  bio1_summary, bio5_summary, bio6_summary, bio4_summary,
+  bio12.log_summary, bio13.log_summary, bio14.log_summary, bio15_summary,
+  aridity_summary, SR_summary, NPP.log_summary, altitude.log_summary,
+  bd_summary, ph_summary, soc.log_summary, tn.log_summary,
+  latitude_summary)) %>% 
+  # Holm-Bonferroni correction
+  mutate(V5 = p.adjust(V4, method = "holm")) %>%
+  dplyr::rename("Phylogenetic signal alpha" = V1, 
+                "Intercept" = V2, 
+                "Beta coefficient" = V3, 
+                "P-value" = V4, 
+                "Adjusted P-value" = V5,
+                "R2" = R2_lik) %>% 
+  rownames_to_column(var = "Variable abbreviation") %>% 
+  mutate_at("Variable abbreviation", str_replace, "_summary", "") %>% 
+  mutate(Variable = recode(`Variable abbreviation`, !!!key)) %>% 
+  relocate("Variable abbreviation", "Variable",
+           "Phylogenetic signal alpha", "Intercept", "Beta coefficient",
+           "P-value", "Adjusted P-value","R2")
+
+comb %>% 
+  knitr::kable(align = "lr", digits = 3) %>% 
+  kableExtra::kable_styling(full_width = F)
+```
+
+
+# PCA
+## Set up
+```{r}
+data <- read.csv("clonality and occurrence median_WorldClimV2&Aridity&NPP&Soil.csv", row.names = "species")
+
+# Log-transform
+data$height.log <- log10(data$height)
+data$bio12.log <- log10(data$bio12)
+data$bio13.log <- log10(data$bio13)
+data$bio14.log <- log10(data$bio14+0.1)
+data$NPP.log <- log10(data$NPP)
+data$altitude.log <- log10(data$altitude)
+data$soc.log <- log10(data$soc)
+data$tn.log <- log10(data$tn)
+
+# Remove NA values
+df <- na.omit(data)
+```
+
+## Plant characteristics
+```{r}
+df_plant <- df[, c("height.log", "GF", "lifespan", "cotyledon")]
+
+# Recode column names
+colnames(df_plant) <- recode(colnames(df_plant), !!!key_plant)
+
+# FAMD (Factor Analysis of Mixed Data; an particular case of MFA -- Multiple Factor Analysis)
+# Two important webpages:
+# Tutorial: http://factominer.free.fr/course/FactoTuto.html
+# Method decision: http://factominer.free.fr/factomethods/index.html
+library(FactoMineR)
+FAMD_plant <- FAMD(df_plant, ncp = 5, graph = FALSE)
+
+# PC1
+PC1_plant = FAMD_plant$ind$coord[, 1, drop = FALSE]
+
+# Eigenvalues
+Dimension <- tibble(Dimension = paste("PC", c(1:4), sep = ""))
+bind_cols(Dimension, FAMD_plant$eig) %>% 
+  knitr::kable(align = "lr", digits = 2) %>% 
+  kableExtra::kable_styling(full_width = F)
+```
+
+## Plant characteristics (plot)
+```{r, fig.height = 5, fig.width = 5}
+# Plot
+library(factoextra)
+FAMD_plant_plot <- fviz_famd_var(FAMD_plant, col.var = "black", repel = TRUE, geom = c("arrow", "text")) + 
+  theme_classic(base_size = 16) + 
+  theme(axis.text = element_text(colour = "black")) +
+  xlim(-1, 1) + ylim(-1, 1)
+
+# Save
+jpeg("graph_median_phylo/PCA.plant.jpg", units = "in", width = 6, height = 6, res = 300)
+FAMD_plant_plot
+dev.off()
+
+FAMD_plant_plot
+```
+
+
+## Environmental variables
+```{r}
+df_env <- df[, c("bio1", "bio5", "bio6", "bio4", 
+                 "bio12.log", "bio13.log", "bio14.log", "bio15", 
+                 "aridity", "SR", "NPP.log", "altitude.log",
+                 "bd", "ph", "soc.log", "tn.log")]
+
+# Recode column names
+colnames(df_env) <- recode(colnames(df_env), !!!key_env)
+
+# PCA
+PCA_env <- FactoMineR::PCA(df_env, scale.unit = TRUE, ncp = 5, graph = FALSE)
+
+# PC1
+PC1_env = PCA_env$ind$coord[, 1, drop = FALSE]
+
+# Eigenvalues
+Dimension <- tibble(Dimension = paste("PC", c(1:16), sep = ""))
+bind_cols(Dimension, PCA_env$eig) %>% 
+  knitr::kable(align = "lr", digits = 2) %>% 
+  kableExtra::kable_styling(full_width = F)
+```
+
+## Environmental variables (plot)
+```{r, fig.height = 5, fig.width = 5}
+# Plot
+library(factoextra)
+PCA_env_plot <- fviz_pca_var(PCA_env, col.var = "black", repel = TRUE, col.circle = "transparent") + 
+  theme_classic(base_size = 16) +
+  theme(axis.text = element_text(colour = "black")) +
+  xlim(-1, 1) + ylim(-1, 1)
+
+# Save
+jpeg("graph_median_phylo/PCA.env.jpg", units = "in", width = 6, height = 6, res = 300)
+PCA_env_plot
+dev.off()
+
+PCA_env_plot
+```
+
+
+## Phylogenetic logistic regression
+Plant characteristics vs Environmental variables
+```{r}
+#-- Merge
+data <- merge(PC1_plant, PC1_env, by = c("row.names"), all = TRUE)
+rownames(data) <- data$Row.names
+colnames(data) <- c("species", "Plant_PC1", "Environment_PC1")
+
+data <- merge(data, df[, "clonality", drop = FALSE], by = c("row.names"), all = TRUE)
+data <- data[, -1]
+rownames(data) <- data$species
+
+#-- Write data
+write_csv(data, file = "PCA_all PC1_plant&environment.csv")
+
+
+#-- Load data and tree
+# data <- read.csv("PCA_all PC1_plant&environment.csv", row.names = "species")
+# tree <- read.tree("tree_4116 in V.PhyloMaker.tre")
+species <- row.names(data)
+pruned.tree <- keep.tip(tree, species)
+# geiger::name.check(pruned.tree, data)    # Check "OK"
+
+
+#-- Univariate regression
+# Plant
+fit = phyloglm(clonality ~ Plant_PC1, phy = pruned.tree, data = data, method = "logistic_IG10")
+Plant_PC1_summary <- c(summary(fit)$alpha, 
+                summary(fit)$coefficients[1,1], 
+                summary(fit)$coefficients[2,1], 
+                summary(fit)$coefficients[2,4], 
+                R2(fit))
+
+# jpeg("graph_median_phylo/PC1_Plant.jpg", units = "in", width = 5, height = 4.5, res = 300)
+logi.hist.plot(data$Plant_PC1, data$clonality, 
+               xlabel = expression("Plant PC1"),
+               type = "hist", boxp = FALSE)
+curve(plogis(coef(fit)[1] + coef(fit)[2] * x), col = "black", lwd = 4, add = TRUE)
+
+
+# Environment
+fit = phyloglm(clonality ~ Environment_PC1, phy = pruned.tree, data = data, method = "logistic_IG10")
+Environment_PC1_summary <- c(summary(fit)$alpha, 
+                summary(fit)$coefficients[1,1], 
+                summary(fit)$coefficients[2,1], 
+                summary(fit)$coefficients[2,4], 
+                R2(fit))
+
+# jpeg("graph_median_phylo/PC1_Environment.jpg", units = "in", width = 5, height = 4.5, res = 300)
+logi.hist.plot(data$Environment_PC1, data$clonality, 
+               xlabel = expression("Environment PC1"),
+               type = "hist", boxp = FALSE)
+curve(plogis(coef(fit)[1] + coef(fit)[2] * x), col = "black", lwd = 4, add = TRUE)
+
+
+# Summary
+comb <- data.frame(rbind(Plant_PC1_summary, Environment_PC1_summary)) %>% 
+  # Holm-Bonferroni correction
+  mutate(V5 = p.adjust(V4, method = "holm")) %>%
+  dplyr::rename("Phylogenetic signal alpha" = V1, 
+                "Intercept" = V2, 
+                "Beta coefficient" = V3, 
+                "P-value" = V4, 
+                "Adjusted P-value" = V5,
+                "R2" = R2_lik) %>% 
+  rownames_to_column(var = "Variable abbreviation") %>% 
+  mutate_at("Variable abbreviation", str_replace, "_summary", "") %>% 
+  mutate(Variable = recode(`Variable abbreviation`,
+                           Plant_PC1 = "Plant PC1",
+                           Environment_PC1 = "Environment PC1")) %>% 
+  relocate("Variable abbreviation", "Variable",
+           "Phylogenetic signal alpha", "Intercept", "Beta coefficient",
+           "P-value", "Adjusted P-value","R2")
+
+comb %>% 
+  knitr::kable(align = "lr", digits = 3) %>% 
+  kableExtra::kable_styling(full_width = F)
+```
+
+
+```{r, fig.height = 5, fig.width = 5}
+#-- Multiple regression
+fit = phyloglm(clonality ~ scale(Plant_PC1) + scale(Environment_PC1), phy = pruned.tree, data = data, method = "logistic_IG10")
+summary(fit); R2(fit)
+
+# Relative importance
+Plant_PC1 = coef(fit)[2] / sum(abs(coef(fit))[2:3])
+Environment_PC1 = coef(fit)[3] / sum(abs(coef(fit))[2:3])
+
+# Plot
+I <- c(Plant_PC1, Environment_PC1) * 100
+name <- c("Plant", "Environment")
+var <- data.frame(I = abs(I), name)
+PlantEnvironment <- ggplot2::ggplot(data = var, aes(x = reorder(name, -I), y = I)) +
+  # "x = reorder(name, -I)" is to make plot factors in a descending order
+  geom_bar(stat = "identity", color = "black", fill = "grey50") +
+  labs(x = NULL, y = "Relative importance (%)") +
+  theme_classic(base_size = 16) +
+  theme(axis.text = element_text(colour = "black"))
+
+PlantEnvironment
+```
+
+## Plot
+```{r, fig.width = 15, fig.height = 5}
+library(cowplot)
+Fig_3 <- plot_grid(FAMD_plant_plot, PCA_env_plot, PlantEnvironment, 
+          nrow = 1, labels = c("(a)", "(b)", "(c)"), label_size = 16)
+
+# Save
+jpeg("graph_median_phylo/PCA & regression.jpg", units = "in", width = 15, height = 5, res = 300)
+Fig_3
+dev.off()
+
+Fig_3
+```
+
+
+# Within growth form
+## Map
+```{r, fig.width = 14.4, fig.height = 12}
+# Herbaceous
+dat = read_csv("clonality and grid_Herbaceous.csv")
+dat = dat %>% 
+  filter(CLONALITY_COUNT >= 5) %>% 
+  rename(longitude = Axis_0, latitude = Axis_1, prop = CLONALITY_MEAN) %>% 
+  dplyr::select(longitude, latitude, prop)
+
+# midpoint = 0.4
+map_H <- ggplot(dat, aes(x = longitude, y = latitude, colour = prop)) +
+  geom_point(shape = 15, cex = 4.5) +   # cex = 4.85 is full-filled grids
+  scale_colour_gradient2(high = "#253494", mid = "#41b6c4", low = "#edf9b1",
+                         midpoint = 0.4, 
+                         name = "Proportion of\nclonal species") +
+  xlab(expression("Longitude ( "^"o"*"E )")) + 
+  ylab(expression("Latitude ( "^"o"*"S )")) +
+  mytheme
+
+# Save
+jpeg("map_Herbaceous.jpg", units = "in", width = 14.4, height = 12, res = 300)
+map_H
+dev.off()
+
+map_H
+
+# Woody
+dat = read_csv("clonality and grid_Woody.csv")
+dat = dat %>% 
+  filter(CLONALITY_COUNT >= 5) %>% 
+  rename(longitude = Axis_0, latitude = Axis_1, prop = CLONALITY_MEAN) %>% 
+  dplyr::select(longitude, latitude, prop)
+
+# midpoint = 0.2
+map_W <- ggplot(dat, aes(x = longitude, y = latitude, colour = prop)) +
+  geom_point(shape = 15, cex = 4.5) +   # cex = 4.85 is full-filled grids
+  scale_colour_gradient2(high = "#253494", mid = "#41b6c4", low = "#edf9b1",
+                         midpoint = 0.2, 
+                         name = "Proportion of\nclonal species") +
+  xlab(expression("Longitude ( "^"o"*"E )")) + 
+  ylab(expression("Latitude ( "^"o"*"S )")) +
+  mytheme
+
+# Save
+jpeg("map_Woody.jpg", units = "in", width = 14.4, height = 12, res = 300)
+map_W
+dev.off()
+
+map_W
+```
+
+
+## Phylogenetic logistic regression
+```{r}
+# Load data
+data <- read.csv("clonality and occurrence median_WorldClimV2&Aridity&NPP&Soil.csv",
+                 row.names = "species")
+data$latitude.abs <- abs(data$latitude)
+
+data_H <- filter(data, GF == "H")
+data_W <- filter(data, GF == "W")
+
+# Load tree
+library(ape)
+tree <- read.tree("tree_4116 in V.PhyloMaker.tre")
+
+tree_H <- keep.tip(tree, row.names(data_H))
+tree_W <- keep.tip(tree, row.names(data_W))
+
+
+# Within H
+fit = phyloglm(clonality ~ latitude.abs, phy = tree_H, data = data_H, method = "logistic_IG10")
+H_latitude_summary <- c(summary(fit)$alpha, 
+                        summary(fit)$coefficients[1,1], 
+                        summary(fit)$coefficients[2,1], 
+                        summary(fit)$coefficients[2,4], 
+                        R2(fit))
+
+H_min <- inv.logit(coef(fit)[1] + coef(fit)[2] * min(data$latitude.abs))
+H_max <- inv.logit(coef(fit)[1] + coef(fit)[2] * max(data$latitude.abs))
+
+# Plot
+# jpeg("graph_median_phylo/latitude_Herbaceous.jpg", units = "in", width = 5, height = 4.5, res = 300)
+logi.hist.plot(data$latitude.abs, data$clonality, 
+               xlabel = expression("Latitude ( "^"o"*"S )"),
+               type = "hist", boxp = FALSE)
+curve(plogis(coef(fit)[1] + coef(fit)[2] * x), col = "black", lwd = 4, add = TRUE)
+
+
+# Within W
+fit = phyloglm(clonality ~ latitude.abs, phy = tree_W, data = data_W, method = "logistic_IG10")
+W_latitude_summary <- c(summary(fit)$alpha, 
+                        summary(fit)$coefficients[1,1], 
+                        summary(fit)$coefficients[2,1], 
+                        summary(fit)$coefficients[2,4], 
+                        R2(fit))
+
+W_min <- inv.logit(coef(fit)[1] + coef(fit)[2] * min(data$latitude.abs))
+W_max <- inv.logit(coef(fit)[1] + coef(fit)[2] * max(data$latitude.abs))
+
+# Plot
+# jpeg("graph_median_phylo/latitude_Woody.jpg", units = "in", width = 5, height = 4.5, res = 300)
+logi.hist.plot(data$latitude.abs, data$clonality, 
+               xlabel = expression("Latitude ( "^"o"*"S )"),
+               type = "hist", boxp = FALSE)
+curve(plogis(coef(fit)[1] + coef(fit)[2] * x), col = "black", lwd = 4, add = TRUE)
+```
+
+## Summary
+```{r}
+comb <- data.frame(rbind(H_latitude_summary, W_latitude_summary)) %>% 
+  # Holm-Bonferroni correction
+  mutate(V5 = p.adjust(V4, method = "holm")) %>%
+  dplyr::rename("Phylogenetic signal alpha" = V1, 
+                "Intercept" = V2, 
+                "Beta coefficient" = V3, 
+                "P-value" = V4, 
+                "Adjusted P-value" = V5,
+                "R2" = R2_lik) %>% 
+  rownames_to_column(var = "Variable abbreviation") %>% 
+  mutate_at("Variable abbreviation", str_replace, "_summary", "") %>% 
+  mutate(Variable = recode(`Variable abbreviation`, 
+                           H_latitude = "Herbaceous", W_latitude = "Woody")) %>% 
+  relocate("Variable abbreviation", "Variable",
+           "Phylogenetic signal alpha", "Intercept", "Beta coefficient",
+           "P-value", "Adjusted P-value","R2")
+
+Range <- tibble(Variable = c("Herbaceous", "Woody"),
+       Predict_min = c(H_min, W_min), 
+       Predict_max = c(H_max, W_max))
+
+comb <- left_join(comb, Range, by = "Variable") %>% 
+  dplyr::select(-"Variable abbreviation")
+
+comb %>% 
+  knitr::kable(align = "lr", digits = 3) %>% 
+  kableExtra::kable_styling(full_width = F)
+```
